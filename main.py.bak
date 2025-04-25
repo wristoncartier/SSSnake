@@ -1,0 +1,1766 @@
+import sys
+import os
+import json
+import base64
+import zlib
+import requests
+from enum import Enum
+from typing import Optional, Dict, List, Tuple
+from dataclasses import dataclass
+from PyQt6.QtWidgets import *
+from PyQt6.QtCore import *
+from PyQt6.QtGui import *
+from PyQt6.Qsci import QsciScintilla
+import psutil
+from ctypes import CDLL, c_char_p, CFUNCTYPE, c_void_p, c_int, c_uint64
+from concurrent.futures import ThreadPoolExecutor
+import lupa
+from lupa import LuaRuntime
+import darkdetect
+from pygments import highlight
+from pygments.lexers.scripting import LuaLexer
+from pygments.formatters import HtmlFormatter
+import darkdetect
+from pygments import highlight
+from pygments.lexers import LuaLexer
+from pygments.formatters import HtmlFormatter
+from ctypes import CDLL, c_char_p, CFUNCTYPE, c_void_p, c_int, c_uint64
+from concurrent.futures import ThreadPoolExecutor
+from roblox_injector import RobloxInjector
+from script_obfuscator import ScriptObfuscator
+
+# Script Types
+class ScriptType(Enum):
+    LUAU = "Luau"
+    LUA = "Lua"
+
+# Script Categories
+class ScriptCategory(Enum):
+    COMBAT = "Combat"
+    FARMING = "Farming"
+    MOVEMENT = "Movement"
+    VISUAL = "Visual"
+    UI = "UI"
+    MISC = "Misc"
+    CUSTOM = "Custom"
+
+@dataclass
+class Script:
+    name: str
+    content: str
+    type: ScriptType
+    category: ScriptCategory
+    auto_execute: bool = False
+    favorite: bool = False
+
+class ScriptManager:
+    def __init__(self):
+        self.scripts: Dict[str, Script] = {}
+        self.auto_execute_scripts: List[str] = []
+        self.load_scripts()
+    
+    def load_scripts(self):
+        """Load scripts from storage"""
+        try:
+            if os.path.exists('scripts.json'):
+                with open('scripts.json', 'r') as f:
+                    data = json.load(f)
+                    for script_data in data:
+                        script = Script(
+                            name=script_data['name'],
+                            content=base64.b64decode(script_data['content']).decode(),
+                            type=ScriptType(script_data['type']),
+                            category=ScriptCategory(script_data['category']),
+                            auto_execute=script_data.get('auto_execute', False),
+                            favorite=script_data.get('favorite', False)
+                        )
+                        self.scripts[script.name] = script
+                        if script.auto_execute:
+                            self.auto_execute_scripts.append(script.name)
+        except Exception as e:
+            print(f"Error loading scripts: {e}")
+    
+    def save_scripts(self):
+        """Save scripts to storage"""
+        try:
+            data = [{
+                'name': script.name,
+                'content': base64.b64encode(script.content.encode()).decode(),
+                'type': script.type.value,
+                'category': script.category.value,
+                'auto_execute': script.auto_execute,
+                'favorite': script.favorite
+            } for script in self.scripts.values()]
+            
+            with open('scripts.json', 'w') as f:
+                json.dump(data, f)
+        except Exception as e:
+            print(f"Error saving scripts: {e}")
+    
+    def add_script(self, script: Script):
+        """Add a new script"""
+        self.scripts[script.name] = script
+        if script.auto_execute:
+            self.auto_execute_scripts.append(script.name)
+        self.save_scripts()
+    
+    def remove_script(self, name: str):
+        """Remove a script"""
+        if name in self.scripts:
+            script = self.scripts.pop(name)
+            if script.auto_execute:
+                self.auto_execute_scripts.remove(name)
+            self.save_scripts()
+    
+    def get_scripts_by_category(self, category: ScriptCategory) -> List[Script]:
+        """Get all scripts in a category"""
+        return [s for s in self.scripts.values() if s.category == category]
+    
+    def get_favorite_scripts(self) -> List[Script]:
+        """Get favorite scripts"""
+        return [s for s in self.scripts.values() if s.favorite]
+
+class LuaExecutor:
+    def __init__(self):
+        self.lua = LuaRuntime(unpack_returned_tuples=True)
+        self.setup_environment()
+    
+    def setup_environment(self):
+        """Set up the Lua environment with safe defaults"""
+        # Add safe versions of Lua standard libraries
+        self.lua.execute("""
+            -- Remove unsafe functions
+            os = nil
+            io = nil
+            package = nil
+            require = nil
+            load = nil
+            loadfile = nil
+            dofile = nil
+            
+            -- Add Roblox-like environment
+            Vector3 = {
+                new = function(x, y, z)
+                    return {x = x or 0, y = y or 0, z = z or 0}
+                end
+            }
+            
+            Instance = {
+                new = function(className)
+                    return {ClassName = className}
+                end
+            }
+            
+            game = {
+                Players = {
+                    LocalPlayer = {
+                        Character = {
+                            HumanoidRootPart = {
+                                Position = Vector3.new(0, 0, 0)
+                            },
+                            Humanoid = {
+                                WalkSpeed = 16,
+                                JumpPower = 50
+                            }
+                        },
+                        Name = "Player1"
+                    },
+                    GetPlayers = function()
+                        return {game.Players.LocalPlayer}
+                    end
+                },
+                GetService = function(name)
+                    return {Name = name}
+                end
+            }
+            
+            -- Basic utility functions
+            wait = function(seconds)
+                -- Simulate wait
+            end
+            
+            print = function(...)
+                -- Print will be handled by the executor
+            end
+        """)
+    
+    def execute(self, script: str, script_type: ScriptType) -> tuple[bool, str, int]:
+        """Execute a Lua script"""
+        try:
+            # Execute the script
+            self.lua.execute(script)
+            return True, "Success", 0
+        except Exception as e:
+            error_msg = str(e)
+            # Try to extract line number from Lua error
+            line_num = -1
+            if '[string "<python>"]:' in error_msg:
+                try:
+                    line_num = int(error_msg.split('[string "<python>"]:')[1].split(':')[0])
+                except:
+                    pass
+            return False, error_msg, line_num
+
+class LuaSyntaxHighlighter(QSyntaxHighlighter):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.lexer = LuaLexer()
+        self.formatter = HtmlFormatter(style='monokai')
+
+    def highlightBlock(self, text):
+        html = highlight(text, self.lexer, self.formatter)
+        format = QTextCharFormat()
+        format.setBackground(QColor("#272822"))
+        format.setForeground(QColor("#F8F8F2"))
+        self.setFormat(0, len(text), format)
+
+class SidebarButton(QPushButton):
+    def __init__(self, icon_name, tooltip='', parent=None):
+        super().__init__(parent)
+        self.setFixedSize(40, 40)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(tooltip)
+        self.setStyleSheet("""
+            QPushButton {
+                background-color: #1a1a1a;
+                border: none;
+                border-radius: 8px;
+                padding: 8px;
+                margin: 4px;
+            }
+            QPushButton:hover {
+                background-color: #2d2d2d;
+            }
+            QPushButton:pressed {
+                background-color: #383838;
+            }
+        """)
+        
+class TabButton(QPushButton):
+    def __init__(self, text='', parent=None):
+        super().__init__(text, parent)
+        self.setFixedHeight(30)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: none;
+                color: #808080;
+                padding: 5px 15px;
+                text-align: left;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                color: #ffffff;
+            }
+            QPushButton:checked {
+                color: #00ff9d;
+                background-color: #2d2d2d;
+                border-radius: 5px;
+            }
+        """)
+        self.setCheckable(True)
+
+class ActionButton(QPushButton):
+    def __init__(self, text='', parent=None):
+        super().__init__(text, parent)
+        self.setFixedHeight(36)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet("""
+            QPushButton {
+                background-color: #00ff9d;
+                color: #000000;
+                border: none;
+                border-radius: 8px;
+                padding: 8px 20px;
+                font-weight: bold;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: #00cc7d;
+            }
+            QPushButton:pressed {
+                background-color: #00995e;
+            }
+        """)
+
+class LineNumberArea(QWidget):
+    def __init__(self, editor):
+        super().__init__(editor)
+        self.editor = editor
+
+    def sizeHint(self):
+        return QSize(self.editor.line_number_area_width(), 0)
+
+    def paintEvent(self, event):
+        self.editor.line_number_area_paint_event(event)
+
+class ScriptEditor(QPlainTextEdit):
+    def __init__(self):
+        super().__init__()
+        self.line_number_area = LineNumberArea(self)
+        self.error_line = -1
+        self.syntax_error = False
+        
+        # Editor setup
+        font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        font.setPointSize(12)
+        self.setFont(font)
+        
+        # Line numbers
+        self.blockCountChanged.connect(self.update_line_number_area_width)
+        self.updateRequest.connect(self.update_line_number_area)
+        self.update_line_number_area_width(0)
+        
+        # Text change handler
+        self.textChanged.connect(self.on_text_changed)
+        
+        # Styling
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.setStyleSheet("""
+            QPlainTextEdit {
+                background-color: #1e1e1e;
+                color: #00ff00;
+                border: none;
+                selection-background-color: #264f78;
+                selection-color: #ffffff;
+                font-family: 'Consolas', monospace;
+            }
+        """)
+    
+    def line_number_area_width(self):
+        digits = 1
+        max_num = max(1, self.blockCount())
+        while max_num >= 10:
+            max_num //= 10
+            digits += 1
+        space = 3 + self.fontMetrics().horizontalAdvance('9') * digits
+        return space
+    
+    def update_line_number_area_width(self, _):
+        self.setViewportMargins(self.line_number_area_width(), 0, 0, 0)
+    
+    def update_line_number_area(self, rect, dy):
+        if dy:
+            self.line_number_area.scroll(0, dy)
+        else:
+            self.line_number_area.update(0, rect.y(), self.line_number_area.width(), rect.height())
+        if rect.contains(self.viewport().rect()):
+            self.update_line_number_area_width(0)
+    
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        cr = self.contentsRect()
+        self.line_number_area.setGeometry(QRect(cr.left(), cr.top(),
+                                              self.line_number_area_width(), cr.height()))
+    
+    def line_number_area_paint_event(self, event):
+        painter = QPainter(self.line_number_area)
+        painter.fillRect(event.rect(), QColor('#1e1e1e'))
+        
+        block = self.firstVisibleBlock()
+        block_number = block.blockNumber()
+        top = int(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
+        bottom = top + int(self.blockBoundingRect(block).height())
+        
+        while block.isValid() and top <= event.rect().bottom():
+            if block.isVisible() and bottom >= event.rect().top():
+                number = str(block_number + 1)
+                if block_number + 1 == self.error_line:
+                    painter.fillRect(0, top, self.line_number_area.width(), self.fontMetrics().height(),
+                                  QColor('#ff0000').lighter())
+                painter.setPen(QColor('#6e7681'))
+                rect = QRect(0, top, self.line_number_area.width() - 2, self.fontMetrics().height())
+                painter.drawText(rect, Qt.AlignmentFlag.AlignRight, number)
+            
+            block = block.next()
+            top = bottom
+            bottom = top + int(self.blockBoundingRect(block).height())
+            block_number += 1
+    
+    def highlight_error_line(self, line_number: int):
+        """Highlight a line with error"""
+        self.error_line = line_number
+        self.syntax_error = True
+        self.update()
+        
+        # Change text color to red for the error line
+        cursor = self.textCursor()
+        cursor.movePosition(cursor.MoveOperation.Start)
+        for _ in range(line_number - 1):
+            cursor.movePosition(cursor.MoveOperation.NextBlock)
+        cursor.movePosition(cursor.MoveOperation.EndOfBlock, cursor.MoveMode.KeepAnchor)
+        
+        fmt = cursor.charFormat()
+        fmt.setForeground(QColor('#ff0000'))
+        cursor.setCharFormat(fmt)
+    
+    def clear_error_highlight(self):
+        """Clear error highlighting"""
+        self.error_line = -1
+        self.syntax_error = False
+        
+        # Reset all text to green
+        cursor = self.textCursor()
+        cursor.movePosition(cursor.MoveOperation.Start)
+        cursor.movePosition(cursor.MoveOperation.End, cursor.MoveMode.KeepAnchor)
+        fmt = cursor.charFormat()
+        fmt.setForeground(QColor('#00ff00'))
+        cursor.setCharFormat(fmt)
+        cursor.clearSelection()
+        
+        self.update()
+    
+    def on_text_changed(self):
+        """Handle text changes"""
+        try:
+            if not self.syntax_error:
+                # Get current line
+                cursor = self.textCursor()
+                cursor.select(QTextCursor.BlockUnderCursor)
+                line_text = cursor.selectedText()
+                
+                # Check for syntax errors
+                try:
+                    if line_text.strip():
+                        compile(line_text, '<string>', 'exec')
+                    # No error, make it green
+                    fmt = QTextCharFormat()
+                    fmt.setForeground(QColor('#00ff00'))
+                    cursor.setCharFormat(fmt)
+                except SyntaxError:
+                    # Syntax error, make it red
+                    fmt = QTextCharFormat()
+                    fmt.setForeground(QColor('#ff0000'))
+                    cursor.setCharFormat(fmt)
+                
+                cursor.clearSelection()
+        except Exception:
+            pass  # Ignore any other errors during typing
+    
+    def get_text(self) -> str:
+        """Get the editor content"""
+        return self.toPlainText()
+    
+    def set_text(self, text: str):
+        """Set the editor content"""
+        self.setPlainText(text)
+    
+    def clear(self):
+        """Clear the editor content"""
+        super().clear()
+
+class ScriptExecutor(QMainWindow):
+    execution_finished = pyqtSignal(str)
+    injection_status = pyqtSignal(bool)
+    
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle('Script Executor')
+        self.resize(1200, 800)
+        
+        # Initialize components
+        self.injector = RobloxInjector()
+        self.obfuscator = ScriptObfuscator()
+        self.obfuscate_enabled = False
+        
+        # Define themes
+        self.themes = {
+            'Dark': {
+                'background': '#1a1a1a',
+                'secondary': '#2d2d2d',
+                'accent': '#8b00ff',
+                'hover': '#9f1fff',
+                'pressed': '#7700cc',
+                'text': '#ffffff'
+            },
+            'Light': {
+                'background': '#ffffff',
+                'secondary': '#f0f0f0',
+                'accent': '#8b00ff',
+                'hover': '#9f1fff',
+                'pressed': '#7700cc',
+                'text': '#000000'
+            },
+            'Ocean': {
+                'background': '#1e2a3a',
+                'secondary': '#2c3e50',
+                'accent': '#3498db',
+                'hover': '#2980b9',
+                'pressed': '#216897',
+                'text': '#ecf0f1'
+            },
+            'Forest': {
+                'background': '#2c3e2e',
+                'secondary': '#3e523f',
+                'accent': '#4caf50',
+                'hover': '#43a047',
+                'pressed': '#388e3c',
+                'text': '#f1f8e9'
+            },
+            'Sunset': {
+                'background': '#2c1810',
+                'secondary': '#3e1f15',
+                'accent': '#ff5722',
+                'hover': '#f4511e',
+                'pressed': '#e64a19',
+                'text': '#fbe9e7'
+            }
+        }
+        
+        # Set up the UI
+        self.setup_ui()
+        
+        # State
+        self.is_injected = False
+        self.current_tab = None
+        self.fps_unlocker_process = None
+        
+        # Load secure dylib
+        try:
+            lib_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lib', 'libsecure_executor.dylib')
+            self.secure_dll = CDLL(lib_path)
+            
+            # Set function signatures
+            self.secure_dll.ValidateScript.argtypes = [c_char_p]
+            self.secure_dll.ValidateScript.restype = c_int
+            
+            self.secure_dll.ExecuteScript.argtypes = [c_char_p]
+            self.secure_dll.ExecuteScript.restype = c_int
+            
+            self.secure_dll.GetSecurityInfo.argtypes = []
+            self.secure_dll.GetSecurityInfo.restype = c_char_p
+            
+            # Verify library security
+            security_info = self.secure_dll.GetSecurityInfo()
+            if not security_info or b'Integrity: Verified' not in security_info:
+                raise Exception('Library integrity check failed')
+                
+        except Exception as e:
+            self.secure_dll = None
+            print(f'Warning: Secure library not loaded - {str(e)}')
+        
+        self.themes = {
+            'Dark': {
+                'background': '#1a1a1a',
+                'secondary': '#2d2d2d',
+                'accent': '#8b00ff',
+                'hover': '#9f1fff',
+                'pressed': '#7700cc',
+                'text': '#ffffff'
+            },
+            'Light': {
+                'background': '#ffffff',
+                'secondary': '#f0f0f0',
+                'accent': '#8b00ff',
+                'hover': '#9f1fff',
+                'pressed': '#7700cc',
+                'text': '#000000'
+            },
+            'Ocean': {
+                'background': '#1e2a3a',
+                'secondary': '#2c3e50',
+                'accent': '#3498db',
+                'hover': '#2980b9',
+                'pressed': '#216897',
+                'text': '#ecf0f1'
+            },
+            'Forest': {
+                'background': '#2c3e2e',
+                'secondary': '#3e523f',
+                'accent': '#4caf50',
+                'hover': '#43a047',
+                'pressed': '#388e3c',
+                'text': '#f1f8e9'
+            },
+            'Sunset': {
+                'background': '#2c1810',
+                'secondary': '#3e1f15',
+                'accent': '#ff5722',
+                'hover': '#f4511e',
+                'pressed': '#e64a19',
+                'text': '#fbe9e7'
+            }
+        }
+        
+        # Initialize scripts list
+        self.init_scripts()
+        
+        # Set initial theme
+        self.change_theme('Dark')
+        
+        # Show window
+        self.show()
+    
+    def toggle_fps_unlocker(self):
+        """Toggle the FPS unlocker"""
+        if self.fps_toggle.isChecked():
+            try:
+                # Create FPS unlocker script
+                fps_script = f"""
+                game:GetService('RunService'):Set3dRenderingEnabled(true)
+                setfpscap({self.fps_limit_input.value()})
+                """
+                
+                # Execute the script
+                if self.is_injected:
+                    self.console.append('⚡ Enabling FPS unlocker...')
+                    self.thread_pool.submit(self.run_script, fps_script, ScriptType.LUAU)
+                else:
+                    self.console.append('❌ Please inject first')
+                    self.fps_toggle.setChecked(False)
+            except Exception as e:
+                self.console.append(f'❌ FPS unlocker error: {str(e)}')
+                self.fps_toggle.setChecked(False)
+        else:
+            try:
+                # Reset FPS to default
+                if self.is_injected:
+                    self.console.append('⚡ Disabling FPS unlocker...')
+                    self.thread_pool.submit(self.run_script, 'setfpscap(60)', ScriptType.LUAU)
+            except Exception as e:
+                self.console.append(f'❌ Error disabling FPS unlocker: {str(e)}')
+    
+    def setup_ui(self):
+        # Initialize managers and executors
+        self.thread_pool = ThreadPoolExecutor(max_workers=2)
+        self.script_manager = ScriptManager()
+        self.lua_executor = LuaExecutor()
+        
+        # State variables
+        self.roblox_pid = None
+        self.current_theme = 'dark' if darkdetect.isDark() else 'light'
+        self.current_script_type = ScriptType.LUAU
+        self.fps_unlocked = False
+        self.esp_enabled = False
+        self.noclip_enabled = False
+
+        # Main widget and layout
+        main_widget = QWidget()
+        self.setCentralWidget(main_widget)
+        main_layout = QHBoxLayout(main_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # Sidebar
+        sidebar = QWidget()
+        sidebar.setFixedWidth(50)
+        sidebar.setStyleSheet("""
+            QWidget {
+                background-color: #1a1a1a;
+                border-right: 1px solid #2d2d2d;
+            }
+        """)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(5, 10, 5, 10)
+        sidebar_layout.setSpacing(5)
+
+        # Sidebar buttons
+        self.home_btn = SidebarButton('🏛', 'Home')
+        self.script_btn = SidebarButton('📝', 'Script Editor')
+        self.hub_btn = SidebarButton('🔗', 'Script Hub')
+        self.settings_btn = SidebarButton('⚙️', 'Settings')
+        
+        sidebar_layout.addWidget(self.home_btn)
+        sidebar_layout.addWidget(self.script_btn)
+        sidebar_layout.addWidget(self.hub_btn)
+        sidebar_layout.addSpacing(20)
+        sidebar_layout.addWidget(self.settings_btn)
+        sidebar_layout.addStretch()
+        
+        main_layout.addWidget(sidebar)
+        
+        # Content area
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+        
+        # Top bar
+        top_bar = QWidget()
+        top_bar.setFixedHeight(60)
+        top_bar.setStyleSheet("""
+            QWidget {
+                background-color: #1a1a1a;
+                border-bottom: 2px solid #00ff9d;
+            }
+            QLabel {
+                color: #808080;
+                font-size: 13px;
+            }
+            QComboBox {
+                background-color: #2d2d2d;
+                color: #ffffff;
+                border: none;
+                border-radius: 5px;
+                padding: 5px 10px;
+                min-width: 120px;
+                font-size: 13px;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 20px;
+            }
+            QComboBox::down-arrow {
+                image: url(down_arrow.png);
+                width: 12px;
+                height: 12px;
+            }
+            QComboBox:hover {
+                background-color: #3d3d3d;
+            }
+            QPushButton {
+                background-color: #2d2d2d;
+                color: #ffffff;
+                border: none;
+                border-radius: 5px;
+                padding: 8px 15px;
+                font-size: 13px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #3d3d3d;
+            }
+            QPushButton:pressed {
+                background-color: #4d4d4d;
+            }
+            QPushButton:checked {
+                background-color: #00ff9d;
+                color: #000000;
+            }
+        """)
+        
+        top_layout = QHBoxLayout(top_bar)
+        top_layout.setContentsMargins(15, 0, 15, 0)
+        # Script type selector
+        script_type_layout = QHBoxLayout()
+        script_type_label = QLabel('Script Type:')
+        script_type_label.setStyleSheet('color: #808080; font-size: 13px;')
+        script_type_layout.addWidget(script_type_label)
+        
+        self.script_type_combo = QComboBox()
+        self.script_type_combo.addItems([t.value for t in ScriptType])
+        self.script_type_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #2d2d2d;
+                color: white;
+                border: none;
+                border-radius: 5px;
+                padding: 5px;
+                min-width: 100px;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+            QComboBox::down-arrow {
+                image: url(down_arrow.png);
+                width: 12px;
+                height: 12px;
+            }
+        """)
+        script_type_layout.addWidget(self.script_type_combo)
+        top_layout.addLayout(script_type_layout)
+        
+        top_layout.addStretch()
+        
+        # Tools section
+        tools_layout = QHBoxLayout()
+        
+        # FPS Unlocker
+        self.fps_btn = QPushButton('🚀 FPS')
+        self.fps_btn.setCheckable(True)
+        self.fps_btn.clicked.connect(self.toggle_fps_unlocker)
+        self.fps_btn.setStyleSheet(self.get_tool_button_style())
+        tools_layout.addWidget(self.fps_btn)
+        
+        # ESP
+        self.esp_btn = QPushButton('👁 ESP')
+        self.esp_btn.setCheckable(True)
+        self.esp_btn.clicked.connect(self.toggle_esp)
+        self.esp_btn.setStyleSheet(self.get_tool_button_style())
+        tools_layout.addWidget(self.esp_btn)
+        
+        # Noclip
+        self.noclip_btn = QPushButton('🛸 Noclip')
+        self.noclip_btn.setCheckable(True)
+        self.noclip_btn.clicked.connect(self.toggle_noclip)
+        self.noclip_btn.setStyleSheet(self.get_tool_button_style())
+        tools_layout.addWidget(self.noclip_btn)
+        
+        # Obfuscate
+        self.obfuscate_btn = QPushButton('🔒 Obfuscate')
+        self.obfuscate_btn.setCheckable(True)
+        self.obfuscate_btn.clicked.connect(lambda: setattr(self, 'obfuscate_enabled', self.obfuscate_btn.isChecked()))
+        self.obfuscate_btn.setStyleSheet(self.get_tool_button_style())
+        tools_layout.addWidget(self.obfuscate_btn)
+        
+        tools_layout.addSpacing(20)
+        
+        # Status and main buttons
+        status_layout = QHBoxLayout()
+        
+        self.status_label = QLabel('Not Injected')
+        self.status_label.setStyleSheet('color: #808080; font-size: 13px;')
+        status_layout.addWidget(self.status_label)
+        
+        self.inject_btn = ActionButton('Inject')
+        self.inject_btn.clicked.connect(self.inject_roblox)
+        status_layout.addWidget(self.inject_btn)
+        
+        self.execute_btn = ActionButton('Execute')
+        self.execute_btn.clicked.connect(self.execute_script)
+        self.execute_btn.setEnabled(False)
+        status_layout.addWidget(self.execute_btn)
+        
+        tools_layout.addLayout(status_layout)
+        top_layout.addLayout(tools_layout)
+        
+        content_layout.addWidget(top_bar)
+        
+        # Main content area
+        content_area = QWidget()
+        content_area_layout = QVBoxLayout(content_area)
+        content_area_layout.setContentsMargins(0, 0, 0, 0)
+        content_area_layout.setSpacing(0)
+        
+        # Main tab widget
+        self.main_tabs = QTabWidget()
+        self.main_tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: none;
+                background: #1a1a1a;
+            }
+            QTabWidget::tab-bar {
+                alignment: center;
+            }
+            QTabBar::tab {
+                background: #2d2d2d;
+                color: #808080;
+                padding: 12px 30px;
+                border: none;
+                margin: 0;
+                font-size: 13px;
+                font-weight: bold;
+            }
+            QTabBar::tab:selected {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #00ff9d, stop:1 #00cc7d);
+                color: #000000;
+            }
+            QTabBar::tab:hover:!selected {
+                background: #3d3d3d;
+                color: #ffffff;
+            }
+        """)
+        
+        # Editor tab
+        self.editor_tab = QWidget()
+        editor_layout = QVBoxLayout(self.editor_tab)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
+        editor_layout.setSpacing(0)
+        
+        # Script tabs
+        self.tab_bar = QWidget()
+        self.tab_layout = QHBoxLayout(self.tab_bar)
+        self.tab_layout.setContentsMargins(10, 5, 10, 5)
+        self.tab_layout.setSpacing(5)
+        
+        # Add tab button
+        add_tab_btn = QPushButton('+')
+        add_tab_btn.setFixedSize(24, 24)
+        add_tab_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2d2d2d;
+                color: white;
+                border: none;
+                border-radius: 12px;
+                font-size: 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #3d3d3d;
+            }
+        """)
+        add_tab_btn.clicked.connect(self.add_new_tab)
+        
+        self.tab_layout.addStretch()
+        self.tab_layout.addWidget(add_tab_btn)
+        
+        editor_layout.addWidget(self.tab_bar)
+        
+        # Editor stack
+        self.editor_stack = QStackedWidget()
+        editor_layout.addWidget(self.editor_stack)
+        
+        # Initialize first tab
+        self.tabs = []
+        self.current_tab = None
+        self.add_new_tab()
+        
+        # Console output
+        self.console = QTextEdit()
+        self.console.setReadOnly(True)
+        self.console.setMaximumHeight(200)
+        self.console.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+                border: none;
+                border-top: 1px solid #333;
+                font-family: 'Consolas', monospace;
+            }
+        """)
+        editor_layout.addWidget(self.console)
+        
+        # Script Hub tab
+        self.script_hub_tab = QWidget()
+        script_hub_layout = QVBoxLayout(self.script_hub_tab)
+        script_hub_layout.setContentsMargins(10, 10, 10, 10)
+        
+        # Search bar
+        search_layout = QHBoxLayout()
+        search_input = QLineEdit()
+        search_input.setPlaceholderText('Search scripts...')
+        search_input.setStyleSheet("""
+            QLineEdit {
+                background-color: #2d2d2d;
+                color: #ffffff;
+                border: none;
+                border-radius: 5px;
+                padding: 10px;
+                font-size: 13px;
+            }
+            QLineEdit:focus {
+                background-color: #3d3d3d;
+            }
+        """)
+        search_btn = QPushButton('🔍 Search')
+        search_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #00ff9d;
+                color: #000000;
+                border: none;
+                border-radius: 5px;
+                padding: 10px 20px;
+                font-size: 13px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #00cc7d;
+            }
+        """)
+        search_layout.addWidget(search_input)
+        search_layout.addWidget(search_btn)
+        script_hub_layout.addLayout(search_layout)
+        
+        # Scripts list
+        scripts_scroll = QScrollArea()
+        scripts_scroll.setWidgetResizable(True)
+        scripts_scroll.setStyleSheet("""
+            QScrollArea {
+                border: none;
+                background-color: transparent;
+            }
+            QScrollBar:vertical {
+                background-color: #1a1a1a;
+                width: 12px;
+                margin: 0;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #2d2d2d;
+                min-height: 30px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background-color: #3d3d3d;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0;
+            }
+        """)
+        
+        scripts_widget = QWidget()
+        self.scripts_layout = QVBoxLayout(scripts_widget)
+        self.scripts_layout.setContentsMargins(0, 0, 0, 0)
+        self.scripts_layout.setSpacing(5)
+        scripts_scroll.setWidget(scripts_widget)
+        
+        # Load initial scripts
+        self.load_scripts_from_hub()
+        
+        # Connect search
+        search_btn.clicked.connect(lambda: self.search_scripts(search_input.text()))
+        search_input.returnPressed.connect(lambda: self.search_scripts(search_input.text()))
+        
+        script_hub_layout.addWidget(scripts_scroll)
+        
+        # Settings tab
+        self.settings_tab = self.create_settings_tab()
+        
+        # Add tabs
+        self.main_tabs.addTab(self.editor_tab, 'Editor')
+        self.main_tabs.addTab(self.script_hub_tab, 'Script Hub')
+        self.main_tabs.addTab(self.settings_tab, 'Settings')
+        
+        content_area_layout.addWidget(self.main_tabs)
+        
+        content_layout.addWidget(content_area)
+        
+        main_layout.addWidget(content)
+        
+        # Initialize Roblox monitoring
+        self.roblox_timer = QTimer()
+        self.roblox_timer.timeout.connect(self.check_roblox_process)
+        self.roblox_timer.start(2000)  # Check every 2 seconds
+    
+    def check_roblox_process(self):
+        """Check if Roblox is running and update UI accordingly"""
+        roblox_running = False
+        new_pid = None
+        
+        for proc in psutil.process_iter(['pid', 'name']):
+            try:
+                if 'RobloxPlayer' in proc.info['name']:
+                    roblox_running = True
+                    new_pid = proc.info['pid']
+                    break
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        
+        if roblox_running and not self.is_injected:
+            self.status_label.setText('Roblox Found - Ready to Inject')
+            self.status_label.setStyleSheet('color: #00ff9d; font-size: 13px;')
+            self.inject_btn.setEnabled(True)
+            self.roblox_pid = new_pid
+        elif not roblox_running:
+            self.status_label.setText('Waiting for Roblox')
+            self.status_label.setStyleSheet('color: #808080; font-size: 13px;')
+            self.inject_btn.setEnabled(False)
+            self.execute_btn.setEnabled(False)
+            self.is_injected = False
+            self.roblox_pid = None
+    
+    def inject_roblox(self):
+        """Inject into Roblox process"""
+        try:
+            success, message = self.injector.inject()
+            
+            if success:
+                self.is_injected = True
+                self.status_label.setText('Successfully Injected')
+                self.status_label.setStyleSheet('color: #00ff9d; font-size: 13px;')
+                self.inject_btn.setEnabled(False)
+                self.execute_btn.setEnabled(True)
+                
+                # Notify user
+                QMessageBox.information(self, 'Success', 'Successfully injected into Roblox!')
+            else:
+                QMessageBox.warning(self, 'Error', f'Failed to inject: {message}')
+                
+        except Exception as e:
+            QMessageBox.critical(self, 'Error', f'Injection error: {str(e)}')
+            self.status_label.setText('Injection Failed')
+            self.status_label.setStyleSheet('color: #ff0000; font-size: 13px;')
+    
+    def execute_script(self):
+        """Execute the current script"""
+        if not self.is_injected:
+            QMessageBox.warning(self, 'Error', 'Please inject first')
+            return
+        
+        try:
+            # Get current tab
+            current_tab = self.tabs[self.tab_widget.currentIndex()]
+            script = current_tab.editor.toPlainText()
+            
+            # Apply obfuscation if enabled
+            if self.obfuscate_enabled:
+                try:
+                    script = self.obfuscator.obfuscate(script)
+                    self.console.append('🔒 Script obfuscated')
+                except Exception as e:
+                    self.console.append(f'⚠️ Obfuscation failed: {str(e)}')
+                    return
+            
+            # Execute script
+            success, message = self.injector.execute_script(script)
+            
+            if success:
+                self.console.append('✅ Script executed successfully')
+            else:
+                self.console.append(f'❌ Script execution failed: {message}')
+                
+        except Exception as e:
+            self.console.append(f'❌ Execution error: {str(e)}')
+    
+    def get_tool_button_style(self) -> str:
+        """Get the stylesheet for tool buttons"""
+        return """
+            QPushButton {
+                background-color: #2d2d2d;
+                color: white;
+                border: none;
+                border-radius: 5px;
+                padding: 5px 10px;
+                margin: 0 2px;
+            }
+            QPushButton:hover {
+                background-color: #3d3d3d;
+            }
+            QPushButton:checked {
+                background-color: #007AFF;
+            }
+        """
+    
+    def create_settings_tab(self):
+        """Create the settings tab with theme selector"""
+        settings_tab = QWidget()
+        settings_layout = QVBoxLayout(settings_tab)
+        settings_layout.setContentsMargins(20, 20, 20, 20)
+        settings_layout.setSpacing(20)
+        
+        # Theme selector
+        theme_group = QGroupBox('Theme')
+        theme_layout = QVBoxLayout(theme_group)
+        theme_layout.setSpacing(10)
+        
+        # Add theme buttons
+        for theme_name, theme_data in self.themes.items():
+            theme_btn = QPushButton(theme_name)
+            theme_btn.setFixedHeight(40)
+            theme_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            theme_btn.clicked.connect(lambda checked, name=theme_name: self.change_theme(name))
+            theme_btn.setStyleSheet(f'''
+                QPushButton {{
+                    background-color: {theme_data["accent"]};
+                    color: {theme_data["text"]};
+                    border: none;
+                    border-radius: 4px;
+                    padding: 8px;
+                    font-size: 14px;
+                }}
+                QPushButton:hover {{
+                    background-color: {theme_data["hover"]};
+                }}
+                QPushButton:pressed {{
+                    background-color: {theme_data["pressed"]};
+                }}
+            ''')
+            theme_layout.addWidget(theme_btn)
+        
+        settings_layout.addWidget(theme_group)
+        
+        # Add a note about themes
+        note = QLabel('Click a theme to instantly change the application appearance')
+        note.setWordWrap(True)
+        settings_layout.addWidget(note)
+        
+        # Add FPS Unlocker
+        fps_group = QGroupBox('FPS Unlocker')
+        fps_layout = QVBoxLayout(fps_group)
+        
+        # Add FPS toggle
+        self.fps_toggle = QCheckBox('Enable FPS Unlocker')
+        self.fps_toggle.stateChanged.connect(self.toggle_fps_unlocker)
+        fps_layout.addWidget(self.fps_toggle)
+        
+        settings_layout.addWidget(fps_group)
+        settings_layout.addStretch()
+        
+        return settings_tab
+
+        self.setStyleSheet(f'''
+            QMainWindow, QDialog {{
+                background-color: {theme["background"]};
+            }}
+            QWidget {{
+                background-color: {theme["background"]};
+                color: {theme["text"]};
+            }}
+            QPushButton {{
+                background-color: {theme["accent"]};
+                color: {theme["text"]};
+                border: none;
+                border-radius: 4px;
+                padding: 8px;
+            }}
+            QPushButton:hover {{
+                background-color: {theme["hover"]};
+            }}
+            QPushButton:pressed {{
+                background-color: {theme["pressed"]};
+            }}
+            QLineEdit {{
+                background-color: {theme["secondary"]};
+                color: {theme["text"]};
+                border: none;
+                border-radius: 4px;
+                padding: 8px;
+            }}
+            QLineEdit:focus {{
+                border: 2px solid {theme["accent"]};
+            }}
+            QScrollArea {{
+                border: none;
+            }}
+            QScrollBar:vertical {{
+                background-color: {theme["secondary"]};
+                width: 12px;
+                margin: 0px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {theme["accent"]};
+                min-height: 20px;
+                border-radius: 6px;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                background: none;
+            }}
+        ''')
+        
+        # Update editors
+        for editor in self.findChildren(QsciScintilla):
+            editor.setStyleSheet(f'''
+                QsciScintilla {{
+                    background-color: {theme["secondary"]};
+                    color: {theme["text"]};
+                }}
+            ''')
+        
+        # Update script widgets
+        # Update script widgets
+        for widget in self.script_hub_tab.findChildren(QWidget):
+            if hasattr(widget, 'setStyleSheet'):
+                widget.setStyleSheet(f'''
+                    QWidget {{
+                        background-color: {theme["secondary"]};
+                        color: {theme["text"]};
+                        border-radius: 4px;
+                        padding: 8px;
+                    }}
+                    QPushButton {{
+                        background-color: {theme["accent"]};
+                        color: {theme["text"]};
+                        border: none;
+                        border-radius: 4px;
+                        padding: 8px;
+                        font-size: 14px;
+                    }}
+                    QPushButton:hover {{
+                        background-color: {theme["hover"]};
+                    }}
+                    QPushButton:pressed {{
+                        background-color: {theme["pressed"]};
+                    }}
+                ''')
+    
+    def change_theme(self, theme_name: str):
+        """Change the application theme"""
+        if theme_name not in self.themes:
+            return
+            
+        theme = self.themes[theme_name]
+        
+        # Update main window
+        self.setStyleSheet(f'''
+            QMainWindow, QDialog {{
+                background-color: {theme["background"]};
+            }}
+            QWidget {{
+                background-color: {theme["background"]};
+                color: {theme["text"]};
+            }}
+            QPushButton {{
+                background-color: {theme["accent"]};
+                color: {theme["text"]};
+                border: none;
+                border-radius: 4px;
+                padding: 8px;
+            }}
+            QPushButton:hover {{
+                background-color: {theme["hover"]};
+            }}
+            QPushButton:pressed {{
+                background-color: {theme["pressed"]};
+            }}
+            QLineEdit {{
+                background-color: {theme["secondary"]};
+                color: {theme["text"]};
+                border: none;
+                border-radius: 4px;
+                padding: 8px;
+            }}
+            QTextEdit {{
+                background-color: {theme["secondary"]};
+                color: {theme["text"]};
+                border: none;
+                border-radius: 4px;
+                padding: 8px;
+            }}
+            QTabWidget::pane {{
+                border: none;
+                background-color: {theme["background"]};
+            }}
+            QTabBar::tab {{
+                background-color: {theme["secondary"]};
+                color: {theme["text"]};
+                border: none;
+                padding: 8px;
+                margin: 2px;
+                border-radius: 4px;
+            }}
+            QTabBar::tab:selected {{
+                background-color: {theme["accent"]};
+            }}
+            QTabBar::tab:hover {{
+                background-color: {theme["hover"]};
+            }}
+            QScrollBar:vertical {{
+                background-color: {theme["background"]};
+                width: 12px;
+            }}
+            QScrollBar::handle:vertical {{
+                background-color: {theme["accent"]};
+                border-radius: 6px;
+                min-height: 20px;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                background: none;
+            }}
+            QGroupBox {{
+                border: 1px solid {theme["accent"]};
+                margin-top: 1em;
+                padding-top: 0.5em;
+            }}
+            QGroupBox::title {{
+                color: {theme["text"]};
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 3px;
+            }}
+        ''')
+        
+        # Update editors
+        for i in range(self.main_tabs.count()):
+            editor = self.main_tabs.widget(i)
+            if isinstance(editor, QsciScintilla):
+                editor.setStyleSheet(f'''
+                    QsciScintilla {{
+                        background-color: {theme["secondary"]};
+                        color: {theme["text"]};
+                    }}
+                ''')
+                
+        # Update script widgets
+        for widget in self.script_hub_tab.findChildren(QWidget):
+            if hasattr(widget, 'setStyleSheet'):
+                widget.setStyleSheet(f'''
+                    QWidget {{
+                        background-color: {theme["secondary"]};
+                        color: {theme["text"]};
+                        border-radius: 8px;
+                        padding: 10px;
+                        margin: 5px;
+                    }}
+                    QPushButton {{
+                        background-color: {theme["accent"]};
+                        color: {theme["text"]};
+                        border: none;
+                        border-radius: 3px;
+                        padding: 5px;
+                        font-size: 12px;
+                        font-weight: bold;
+                    }}
+                    QPushButton:hover {{
+                        background-color: {theme["hover"]};
+                    }}
+                    QPushButton:pressed {{
+                        background-color: {theme["pressed"]};
+                    }}
+                ''')
+                
+    def adjust_color(self, color: str, factor: float) -> str:
+        """Adjust a color by a factor"""
+        r = int(color[1:3], 16) * factor
+        g = int(color[3:5], 16) * factor
+        b = int(color[5:7], 16) * factor
+        
+        # Clamp to valid range
+        r = max(0, min(255, int(r)))
+        g = max(0, min(255, int(g)))
+        b = max(0, min(255, int(b)))
+        
+        return f'#{r:02x}{g:02x}{b:02x}'
+    
+    def init_scripts(self):
+        """Initialize the scripts list"""
+        self.all_scripts = [
+            # Admin Scripts
+            {
+                'name': 'Infinite Yield',
+                'description': 'FE Admin Commands',
+                'category': 'Admin',
+                'likes': 1500,
+                'content': 'loadstring(game:HttpGet("https://raw.githubusercontent.com/EdgeIY/infiniteyield/master/source"))()'
+            },
+            {
+                'name': 'CMD-X',
+                'description': 'Admin Commands',
+                'category': 'Admin',
+                'likes': 950,
+                'content': 'loadstring(game:HttpGet("https://raw.githubusercontent.com/CMD-X/CMD-X/master/Source", true))()'
+            },
+            # Universal Hubs
+            {
+                'name': 'Dark Hub',
+                'description': 'Universal Script Hub',
+                'category': 'Universal',
+                'likes': 1200,
+                'content': 'loadstring(game:HttpGet("https://raw.githubusercontent.com/RandomAdamYT/DarkHub/master/Init", true))()'
+            },
+            {
+                'name': 'Domain X',
+                'description': 'Universal Script Hub',
+                'category': 'Universal',
+                'likes': 900,
+                'content': 'loadstring(game:HttpGet("https://raw.githubusercontent.com/shlexware/DomainX/main/source",true))()'
+            },
+            {
+                'name': 'Owl Hub',
+                'description': 'Universal ESP & Aimbot',
+                'category': 'Combat',
+                'likes': 1000,
+                'content': 'loadstring(game:HttpGet("https://raw.githubusercontent.com/CriShoux/OwlHub/master/OwlHub.txt"))()'
+            },
+            # Development Tools
+            {
+                'name': 'Hydroxide',
+                'description': 'Remote Spy & Script Dumper',
+                'category': 'Tools',
+                'likes': 850,
+                'content': '''local owner = "Upbolt"
+local branch = "revision"
+
+local function webImport(file)
+    return loadstring(game:HttpGetAsync(("https://raw.githubusercontent.com/%s/Hydroxide/%s/%s.lua"):format(owner, branch, file)))()\nend
+
+webImport("init")'''
+            },
+            {
+                'name': 'DEX Explorer',
+                'description': 'Game Explorer',
+                'category': 'Tools',
+                'likes': 800,
+                'content': 'loadstring(game:HttpGet("https://raw.githubusercontent.com/peyton2465/Dex/master/out.lua"))()'
+            },
+            {
+                'name': 'Remote Spy',
+                'description': 'Remote Event Logger',
+                'category': 'Tools',
+                'likes': 750,
+                'content': 'loadstring(game:HttpGet("https://github.com/exxtremestuffs/SimpleSpySource/raw/master/SimpleSpy.lua"))()'
+            },
+            # Game Specific
+            {
+                'name': 'Arsenal GUI',
+                'description': 'Arsenal Game Script',
+                'category': 'Games',
+                'likes': 700,
+                'script': 'loadstring(game:HttpGet("https://raw.githubusercontent.com/fusiongreg/BoltsHubV5/main/Main"))()'
+            },
+            {
+                'name': 'Doors GUI',
+                'description': 'Doors Game Script',
+                'category': 'Games',
+                'likes': 650,
+                'content': 'loadstring(game:HttpGet("https://raw.githubusercontent.com/RegularVynixu/Vynixius/main/Doors/Script.lua"))()'
+            },
+            # Utility Scripts
+            {
+                'name': 'Anti AFK',
+                'description': 'Prevents AFK Kicks',
+                'category': 'Utility',
+                'likes': 600,
+                'content': '''local vu = game:GetService("VirtualUser")
+game:GetService("Players").LocalPlayer.Idled:connect(function()
+    vu:Button2Down(Vector2.new(0,0),workspace.CurrentCamera.CFrame)
+    wait(1)
+    vu:Button2Up(Vector2.new(0,0),workspace.CurrentCamera.CFrame)
+end)'''
+            },
+            {
+                'name': 'FPS Boost',
+                'description': 'Improves Performance',
+                'category': 'Utility',
+                'likes': 550,
+                'content': '''local lighting = game:GetService("Lighting")
+local terrain = game:GetService("Workspace").Terrain
+terrain.WaterWaveSize = 0
+terrain.WaterWaveSpeed = 0
+terrain.WaterReflectance = 0
+terrain.WaterTransparency = 0
+lighting.GlobalShadows = false
+lighting.FogEnd = 9e9
+lighting.Brightness = 0
+settings().Rendering.QualityLevel = "Level01"'''
+            },
+            {
+                'name': 'Hydroxide',
+                'description': 'Remote Spy & Script Dumper',
+                'category': 'Tools',
+                'likes': 850,
+                'content': '''local owner = "Upbolt"
+local branch = "revision"
+
+local function webImport(file)
+    return loadstring(game:HttpGetAsync(("https://raw.githubusercontent.com/%s/Hydroxide/%s/%s.lua"):format(owner, branch, file)))()\nend
+
+webImport("init")'''
+            },
+            {
+                'name': 'DEX Explorer',
+                'description': 'Game Explorer',
+                'category': 'Tools',
+                'likes': 800,
+                'content': 'loadstring(game:HttpGet("https://raw.githubusercontent.com/peyton2465/Dex/master/out.lua"))()'
+            },
+            {
+                'name': 'Owl Hub',
+                'description': 'Universal ESP & Aimbot',
+                'category': 'Combat',
+                'likes': 1000,
+                'content': 'loadstring(game:HttpGet("https://raw.githubusercontent.com/CriShoux/OwlHub/master/OwlHub.txt"))()'
+            },
+            {
+                'name': 'CMD-X',
+                'description': 'Admin Commands',
+                'category': 'Admin',
+                'likes': 950,
+                'content': 'loadstring(game:HttpGet("https://raw.githubusercontent.com/CMD-X/CMD-X/master/Source", true))()'
+            },
+            {
+                'name': 'Domain X',
+                'description': 'Universal Script Hub',
+                'category': 'Universal',
+                'likes': 900,
+                'content': 'loadstring(game:HttpGet("https://raw.githubusercontent.com/shlexware/DomainX/main/source",true))()'
+            },
+            {
+                'name': 'Hydroxide',
+                'description': 'Remote Spy & Script Dumper',
+                'category': 'Tools',
+                'likes': 850,
+                'content': '''local owner = "Upbolt"
+local branch = "revision"
+
+local function webImport(file)
+    return loadstring(game:HttpGetAsync(("https://raw.githubusercontent.com/%s/Hydroxide/%s/%s.lua"):format(owner, branch, file)))()\nend
+
+webImport("init")'''
+            },
+            {
+                'name': 'DEX Explorer',
+                'description': 'Game Explorer',
+                'category': 'Tools',
+                'likes': 800,
+                'content': 'loadstring(game:HttpGet("https://raw.githubusercontent.com/peyton2465/Dex/master/out.lua"))()'
+            },
+            {
+                'name': 'Remote Spy',
+                'description': 'Remote Event Logger',
+                'category': 'Tools',
+                'likes': 750,
+                'content': 'loadstring(game:HttpGet("https://github.com/exxtremestuffs/SimpleSpySource/raw/master/SimpleSpy.lua"))()'
+            }
+        ]
+        
+        # Show window
+        self.show()
+    
+    def load_scripts_from_hub(self):
+        try:
+            # Clear existing scripts
+            for i in reversed(range(self.scripts_layout.count())):
+                widget = self.scripts_layout.itemAt(i).widget()
+                if widget:
+                    widget.setParent(None)
+
+            response = requests.get('https://rscripts.net/api/scripts/recent')
+            if response.status_code == 200:
+                scripts = response.json()
+                for script in scripts:
+                    self.create_script_widget(script)
+            else:
+                self.console.append(f'❌ Failed to load scripts: {response.status_code}')
+        except Exception as e:
+            self.console.append(f'❌ Error loading scripts: {str(e)}')
+    
+    def search_scripts(self, query: str):
+        try:
+            response = requests.get(f'https://rscripts.net/api/scripts/search?q={query}')
+            if response.status_code == 200:
+                scripts = response.json()
+                # Clear existing search results
+                for i in reversed(range(self.scripts_layout.count())):
+                    widget = self.scripts_layout.itemAt(i).widget()
+                    if widget:
+                        widget.setParent(None)
+                # Add new search results
+                for script in scripts:
+                    self.create_script_widget(script)
+            else:
+                self.console.append(f'❌ Failed to search scripts: {response.status_code}')
+        except Exception as e:
+            self.console.append(f'❌ Error searching scripts: {str(e)}')
+    
+    def create_script_widget(self, script):
+        try:
+            widget = QWidget()
+            widget.setStyleSheet("""
+                QWidget {
+                    background-color: #2d2d2d;
+                    border-radius: 8px;
+                    padding: 10px;
+                    margin: 5px;
+                }
+            """)
+            layout = QVBoxLayout(widget)
+            layout.setContentsMargins(10, 10, 10, 10)
+            
+            # Header with name and category
+            header = QHBoxLayout()
+            name = QLabel(script.get('name', 'Untitled Script'))
+            name.setStyleSheet('QLabel { color: #ffffff; font-weight: bold; font-size: 14px; }')
+            header.addWidget(name)
+            
+            category = QLabel(f"🏷️ {script.get('category', 'Uncategorized')}")
+            category.setStyleSheet('QLabel { color: #00ff9d; font-size: 12px; }')
+            header.addWidget(category, alignment=Qt.AlignmentFlag.AlignRight)
+            layout.addLayout(header)
+            
+            # Description
+            desc = QLabel(script.get('description', 'No description available'))
+            desc.setStyleSheet('QLabel { color: #808080; font-size: 12px; }')
+            desc.setWordWrap(True)
+            layout.addWidget(desc)
+            
+            # Execute button
+            execute_btn = QPushButton('Execute')
+            execute_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #8b00ff;
+                    color: #ffffff;
+                    border: none;
+                    border-radius: 3px;
+                    padding: 5px;
+                    font-size: 12px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #9f1fff;
+                }
+            """)
+            execute_btn.clicked.connect(lambda: self.execute_hub_script(script.get('content', '')))
+            layout.addWidget(execute_btn)
+            
+            # Add to scripts list
+            self.scripts_layout.addWidget(widget)
+            
+        except Exception as e:
+            print(f'Error creating script widget: {str(e)}')
+        return widget
+    
+    def execute_hub_script(self, script_content: str):
+        """Execute a script from the hub"""
+        if not self.is_injected:
+            self.console.append('❌ Please inject first!')
+            return
+            
+        try:
+            self.console.append('⚡ Executing script...')
+            self.run_script(script_content, ScriptType.HUB)
+            self.console.append('✅ Script executed successfully!')
+        except Exception as e:
+            self.console.append(f'❌ Error: {str(e)}')
+    
+    def add_new_tab(self) -> TabButton:
+        """Add a new script tab"""
+        tab_count = len(self.tabs) + 1
+        tab = TabButton(f'Script {tab_count}')
+        tab.setChecked(True)
+        
+        # Uncheck other tabs
+        for other_tab in self.tabs:
+            other_tab.setChecked(False)
+        
+        # Create editor for this tab
+        editor = ScriptEditor()
+        self.editor_stack.addWidget(editor)
+        
+        # Connect tab click
+        tab.clicked.connect(lambda: self.switch_to_tab(tab))
+        
+        self.tabs.append(tab)
+        return tab
+    
+    def switch_to_tab(self, clicked_tab: TabButton):
+        """Switch to a different tab"""
+        for i, tab in enumerate(self.tabs):
+            tab.setChecked(tab == clicked_tab)
+            if tab == clicked_tab:
+                self.editor_stack.setCurrentIndex(i)
+                self.current_tab = tab
+    
+    def toggle_fps_unlocker(self):
+        """Toggle FPS unlocker"""
+        try:
+            self.fps_unlocked = self.fps_btn.isChecked()
+            if self.fps_unlocked:
+                # Set FPS to unlimited
+                self.console.append('✅ FPS Unlocker enabled')
+            else:
+                # Reset FPS cap
+                self.console.append('❌ FPS Unlocker disabled')
+        except Exception as e:
+            self.console.append(f'Error toggling FPS unlocker: {str(e)}')
+    
+    def toggle_esp(self):
+        """Toggle ESP"""
+        try:
+            self.esp_enabled = self.esp_btn.isChecked()
+            if self.esp_enabled:
+                # Enable ESP
+                self.console.append('✅ ESP enabled')
+            else:
+                # Disable ESP
+                self.console.append('❌ ESP disabled')
+        except Exception as e:
+            self.console.append(f'Error toggling ESP: {str(e)}')
+    
+    def toggle_noclip(self):
+        """Toggle noclip"""
+        try:
+            self.noclip_enabled = self.noclip_btn.isChecked()
+            if self.noclip_enabled:
+                # Enable noclip
+                self.console.append('✅ Noclip enabled')
+            else:
+                # Disable noclip
+                self.console.append('❌ Noclip disabled')
+        except Exception as e:
+            self.console.append(f'Error toggling noclip: {str(e)}')
+    
+    def closeEvent(self, event):
+        """Clean up when closing the application"""
+        try:
+            if self.injector:
+                self.injector.cleanup()
+        except:
+            pass
+        super().closeEvent(event)
+
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    window = ScriptExecutor()
+    window.show()
+    sys.exit(app.exec())

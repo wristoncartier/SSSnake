@@ -1,0 +1,65 @@
+#!/bin/bash
+
+# Open a terminal window to run SSSnake
+# This ensures we can see any errors and output
+
+# Get the directory where this script is located
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+# Go up to the Contents directory
+CONTENTS_DIR="$( dirname "$DIR" )"
+# Go up to the .app directory
+APP_DIR="$( dirname "$CONTENTS_DIR" )"
+# Go up to the parent directory containing the actual Python files
+PARENT_DIR="$( dirname "$APP_DIR" )"
+
+# Create a temporary script that will be executed in Terminal
+TMP_SCRIPT="/tmp/run_sssnake_$$.sh"
+
+cat > "$TMP_SCRIPT" << 'EOL'
+#!/bin/bash
+
+# SSSnake Launcher Script
+echo "Starting SSSnake..."
+
+# Get the path from the first argument
+SSNAKE_DIR="$1"
+cd "$SSSNAKE_DIR"
+
+# Make sure we have the right Python
+PYTHON="/usr/bin/env python3"
+
+# Function to check if a Python package is installed
+check_package() {
+    $PYTHON -c "import $1" 2>/dev/null
+    return $?
+}
+
+# Function to install a package if it's not already installed
+ensure_package() {
+    if ! check_package "$1"; then
+        echo "Installing required package: $1"
+        $PYTHON -m pip install "$1" --user
+    fi
+}
+
+# Ensure required packages are installed
+echo "Checking dependencies..."
+ensure_package "PyQt6"
+ensure_package "psutil"
+ensure_package "requests"
+
+# Run the application
+echo "Launching SSSnake..."
+$PYTHON "$SSSNAKE_DIR/main.py"
+
+# Keep the terminal window open until user presses a key
+echo ""
+echo "SSSnake has exited. Press any key to close this window."
+read -n 1
+EOL
+
+# Make the temporary script executable
+chmod +x "$TMP_SCRIPT"
+
+# Open Terminal and run the script
+osascript -e "tell application \"Terminal\" to do script \"/bin/bash $TMP_SCRIPT \"$PARENT_DIR\"\""

@@ -1,0 +1,3 @@
+/Users/mohamedhaitham/CascadeProjects/script_executor/build/CMakeFiles/roblox_injector.dir
+/Users/mohamedhaitham/CascadeProjects/script_executor/build/CMakeFiles/edit_cache.dir
+/Users/mohamedhaitham/CascadeProjects/script_executor/build/CMakeFiles/rebuild_cache.dir

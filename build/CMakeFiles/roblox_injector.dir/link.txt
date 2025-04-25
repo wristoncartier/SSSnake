@@ -1,0 +1,1 @@
+/usr/bin/c++  -fexceptions -arch arm64 -dynamiclib -Wl,-headerpad_max_install_names -o lib/roblox_injector.dylib -install_name @rpath/roblox_injector.dylib CMakeFiles/roblox_injector.dir/src/injector.cpp.o CMakeFiles/roblox_injector.dir/src/roblox_api.cpp.o CMakeFiles/roblox_injector.dir/src/memory.cpp.o  -framework Foundation -framework CoreFoundation -framework CoreServices

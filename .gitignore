@@ -1,0 +1,29 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.so
+*.dylib
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.app/
+
+# Logs
+logs/
+*.log
+
+# macOS system files
+.DS_Store
+
+# Backup files
+*.bak
+
+# PyInstaller
+*.spec
+
+# IDE/project files
+.vscode/
+.idea/
+*.swp

@@ -1,0 +1,1 @@
+/usr/bin/c++  -arch arm64 -dynamiclib -Wl,-headerpad_max_install_names -o lib/libsecure_executor.dylib -install_name @rpath/libsecure_executor.dylib CMakeFiles/secure_executor.dir/secure_executor.cpp.o  -Wl,-rpath,@loader_path/../lib /opt/homebrew/opt/openssl/lib/libssl.dylib /opt/homebrew/opt/openssl/lib/libcrypto.dylib
